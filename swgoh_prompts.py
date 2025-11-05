@@ -219,6 +219,24 @@ def format_tw_summary(summary_stats: dict) -> str:
         context_parts.append(f"| Unique Players | {our_stats.get('unique_players', 0)} | {opp_stats.get('unique_players', 0)} |")
         context_parts.append("")
 
+    # Defending leader stats
+    if 'defending_leaders' in summary_stats:
+        context_parts.append("### Defending Leaders We Struggled Against Most")
+        context_parts.append("")
+        context_parts.append("*Sorted by Hold Rate (% of attacks that failed). Higher hold rate = we struggled more.*")
+        context_parts.append("")
+        context_parts.append("| Leader | Attempts | Wins | Holds | Win Rate | Hold Rate | Avg Banners (on wins) |")
+        context_parts.append("|--------|----------|------|-------|----------|-----------|----------------------|")
+
+        for leader in summary_stats['defending_leaders'][:10]:
+            context_parts.append(
+                f"| {leader['leader']} | {leader['total_attempts']} | "
+                f"{leader['wins']} | {leader['holds']} | "
+                f"{leader['win_rate']:.1f}% | {leader['hold_rate']:.1f}% | "
+                f"{leader['avg_banners_on_wins']:.1f} |"
+            )
+        context_parts.append("")
+
     # Additional context note
     context_parts.append("*Note: Full detailed data is available if you need specific player lookups or deeper analysis.*")
 

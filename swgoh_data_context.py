@@ -97,12 +97,21 @@ class SWGOHDataContext:
             activity_log = zone_data.get('activityLogMessage', {})
             event_type = activity_log.get('key', '')
 
-            # Only process successful attacks (SQUAD_WIN events)
-            if event_type != 'TERRITORY_CHANNEL_ACTIVITY_CONFLICT_SQUAD_WIN':
+            # Process both successful attacks (SQUAD_WIN) and failed attacks (EMPTY with warSquad)
+            is_win = event_type == 'TERRITORY_CHANNEL_ACTIVITY_CONFLICT_SQUAD_WIN'
+            is_failed_attack = event_type == 'EMPTY'
+
+            war_squad = payload.get('warSquad', {})
+
+            # Skip if not an attack event (EMPTY without warSquad is zone clearing, not an attack)
+            if not is_win and not (is_failed_attack and war_squad):
+                continue
+
+            # Skip EMPTY events without warSquad (these are zone events, not attacks)
+            if is_failed_attack and not war_squad:
                 continue
 
             info = event.get('info', {})
-            war_squad = payload.get('warSquad', {})
 
             # Extract banner count from params
             params = activity_log.get('param', [])
@@ -115,18 +124,38 @@ class SWGOHDataContext:
                     except (ValueError, IndexError):
                         banners = 0
 
+            # Extract defending squad leader (first unit in cell array, cellIndex 0)
+            defending_leader = None
+            squad = war_squad.get('squad') if war_squad else None
+            cells = squad.get('cell', []) if squad else []
+            if cells:
+                # Find the cell with cellIndex 0 (leader position)
+                for cell in cells:
+                    if cell.get('cellIndex') == 0:
+                        # Extract unit definition ID (e.g., "CHIEFCHIRPA:SEVEN_STAR")
+                        unit_def_id = cell.get('unitDefId', '')
+                        # Remove the :SEVEN_STAR suffix to get character ID
+                        if ':' in unit_def_id:
+                            defending_leader = unit_def_id.split(':')[0]
+                        else:
+                            defending_leader = unit_def_id
+                        break
+
             # Extract attack data
-            # CRITICAL: authorId/authorName is the ATTACKER (who won)
-            # warSquad.playerId/playerName is the DEFENDER (who lost)
+            # CRITICAL: authorId/authorName is the ATTACKER
+            # warSquad.playerId/playerName is the DEFENDER
+            # is_win = True means attacker won, False means defense held
             attack_data = {
                 'attacker_id': info.get('authorId', ''),
                 'attacker_name': info.get('authorName', ''),
                 'defender_id': war_squad.get('playerId', ''),
                 'defender_name': war_squad.get('playerName', ''),
+                'defending_leader': defending_leader,
                 'zone_id': zone_data.get('zoneId', ''),
                 'attacking_guild_id': zone_data.get('guildId', ''),
                 'banners': banners,
                 'squad_power': war_squad.get('power', 0),
+                'is_win': is_win,  # True = attacker won, False = defense held
             }
 
             # Separate by attacking guild
@@ -180,6 +209,9 @@ class SWGOHDataContext:
 
         # Get top performers (for detailed summary)
         our_stats['top_performers'] = self._get_top_performers(our_df, limit=10)
+
+        # Get defending leader statistics (leaders we faced)
+        our_stats['defending_leaders'] = self._get_defending_leader_stats(our_df, limit=10)
 
         # Store full dataframes for potential detailed queries
         our_stats['_our_df'] = our_df
@@ -242,6 +274,64 @@ class SWGOHDataContext:
 
         # Convert to list of dicts
         return player_stats.head(limit).to_dict('records')
+
+    def _get_defending_leader_stats(self, df: pd.DataFrame, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get statistics on defending leaders (leaders we faced in attacks).
+
+        Args:
+            df: DataFrame containing attack data
+            limit: Maximum number of leaders to return
+
+        Returns:
+            List of leader statistics dictionaries with win rate and hold rate
+        """
+        if df.empty:
+            return []
+
+        # Filter out rows where defending_leader is None
+        df_with_leaders = df[df['defending_leader'].notna()]
+
+        if df_with_leaders.empty:
+            return []
+
+        # Group by defending leader and calculate stats
+        leader_groups = df_with_leaders.groupby('defending_leader')
+
+        leader_stats_list = []
+        for leader, group in leader_groups:
+            total_attempts = len(group)
+            wins = group['is_win'].sum()  # Count of True values
+            holds = total_attempts - wins  # Failed attacks
+
+            # Calculate win rate (how often we beat this leader)
+            win_rate = (wins / total_attempts * 100) if total_attempts > 0 else 0
+
+            # Calculate hold rate (how often this leader stopped us)
+            hold_rate = (holds / total_attempts * 100) if total_attempts > 0 else 0
+
+            # Average banners when we DID win
+            wins_only = group[group['is_win'] == True]
+            avg_banners_on_wins = wins_only['banners'].mean() if len(wins_only) > 0 else 0
+
+            leader_stats_list.append({
+                'leader': leader,
+                'total_attempts': total_attempts,
+                'wins': wins,
+                'holds': holds,
+                'win_rate': win_rate,
+                'hold_rate': hold_rate,
+                'avg_banners_on_wins': avg_banners_on_wins
+            })
+
+        # Convert to DataFrame for sorting
+        leader_stats_df = pd.DataFrame(leader_stats_list)
+
+        # Sort by hold_rate descending (leaders we struggled against most)
+        leader_stats_df = leader_stats_df.sort_values('hold_rate', ascending=False)
+
+        # Convert to list of dicts
+        return leader_stats_df.head(limit).to_dict('records')
 
     def get_player_details(self, player_name: str) -> Optional[Dict[str, Any]]:
         """

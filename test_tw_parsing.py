@@ -40,6 +40,18 @@ if context.load_tw_logs('twlogs.json'):
     for i, player in enumerate(summary.get('top_performers', [])[:5], 1):
         print(f"{i}. {player['name']}: {player['total_banners']} banners ({player['attacks']} attacks, {player['avg_banners']:.1f} avg)")
 
+    # Test defending leader extraction
+    print(f"\n{'='*60}")
+    print("SAMPLE DEFENDING LEADERS")
+    print(f"{'='*60}")
+    our_df = summary.get('_our_df')
+    if our_df is not None and not our_df.empty:
+        # Show first 10 attacks with defending leaders
+        sample = our_df[['attacker_name', 'defender_name', 'defending_leader', 'banners']].head(10)
+        print(sample.to_string(index=False))
+    else:
+        print("No attack data available")
+
     print(f"\n✓ Parsing successful!")
 else:
     print("✗ Failed to load TW logs")
