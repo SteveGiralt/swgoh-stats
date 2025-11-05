@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""
+SWGOH API Client for Mhanndalorian Bot
+A client for interacting with the Mhanndalorian Bot API to retrieve SWGOH data.
+"""
+
+import os
+import sys
+import time
+import hashlib
+import hmac
+import json
+import argparse
+import logging
+from typing import Dict, List, Optional, Any
+from pprint import pprint
+from pathlib import Path
+
+import requests
+import pandas as pd
+from dotenv import load_dotenv
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class SWGOHAPIClient:
+    """Client for interacting with the Mhanndalorian Bot API."""
+
+    BASE_URL = "https://mhanndalorianbot.work"
+    API_ENDPOINT = "/api"
+
+    def __init__(self, api_key: str, discord_id: str, use_hmac: bool = False):
+        """
+        Initialize the SWGOH API client.
+
+        Args:
+            api_key: API key for authentication
+            discord_id: Discord user ID for authentication
+            use_hmac: Whether to use HMAC authentication (required for multi-user)
+        """
+        self.api_key = api_key
+        self.discord_id = discord_id
+        self.use_hmac = use_hmac
+        self.session = requests.Session()
+
+    def _generate_hmac_signature(self, method: str, path: str, payload: dict) -> dict:
+        """
+        Generate HMAC signature for API authentication.
+
+        Args:
+            method: HTTP method (uppercase)
+            path: API path (lowercase, e.g., '/twlogs')
+            payload: Request payload dictionary
+
+        Returns:
+            Dictionary containing HMAC authentication headers
+        """
+        req_time = str(int(time.time() * 1000))
+        hmac_obj = hmac.new(key=self.api_key.encode(), digestmod=hashlib.sha256)
+
+        # Add timestamp
+        hmac_obj.update(req_time.encode())
+
+        # Add method (uppercase)
+        hmac_obj.update(method.upper().encode())
+
+        # Add path (lowercase)
+        hmac_obj.update(path.lower().encode())
+
+        # Add MD5 hash of payload
+        payload_str = json.dumps(payload, separators=(',', ':'))
+        payload_hash = hashlib.md5(payload_str.encode()).hexdigest()
+        hmac_obj.update(payload_hash.encode())
+
+        return {
+            "x-timestamp": req_time,
+            "Authorization": hmac_obj.hexdigest()
+        }
+
+    def _make_request(self, endpoint: str, payload_data: dict) -> requests.Response:
+        """
+        Make an API request with proper headers and authentication.
+
+        Args:
+            endpoint: API endpoint path (e.g., '/twlogs')
+            payload_data: Request payload data (will be wrapped in {"payload": ...})
+
+        Returns:
+            Response object from the API
+
+        Raises:
+            requests.RequestException: If the request fails
+        """
+        # Wrap payload in required format
+        payload = {"payload": payload_data}
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip,deflate",
+            "x-discord-id": self.discord_id,
+        }
+
+        # Add authentication
+        if self.use_hmac:
+            headers.update(self._generate_hmac_signature("POST", endpoint, payload))
+        else:
+            headers["api-key"] = self.api_key
+
+        url = f"{self.BASE_URL}{self.API_ENDPOINT}{endpoint}"
+
+        logger.info(f"Making POST request to {url}")
+        logger.debug(f"Payload: {payload}")
+
+        try:
+            response = self.session.post(
+                url=url,
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            return response
+        except requests.RequestException as e:
+            logger.error(f"Request failed: {e}")
+            if hasattr(e.response, 'text'):
+                logger.error(f"Response: {e.response.text}")
+            raise
+
+    def get_tw_logs(self, ally_code: str, enums: bool = False) -> Dict[str, Any]:
+        """
+        Get Territory War logs (attack/deployment/hold records).
+
+        Args:
+            ally_code: Player ally code (e.g., "859194332")
+            enums: Whether to return enum values
+
+        Returns:
+            Dictionary containing TW logs data
+        """
+        payload_data = {
+            "allyCode": ally_code,
+            "enums": enums
+        }
+
+        response = self._make_request("/twlogs", payload_data)
+
+        logger.info(f"Response status: {response.status_code}")
+
+        try:
+            data = response.json()
+            logger.info("Successfully retrieved TW logs")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response: {e}")
+            logger.debug(f"Response text: {response.text}")
+            raise
+
+    def get_player(self, ally_code: str, enums: bool = False) -> Dict[str, Any]:
+        """
+        Get player profile, roster, and datacrons.
+
+        Args:
+            ally_code: Player ally code
+            enums: Whether to return enum values
+
+        Returns:
+            Dictionary containing player data
+        """
+        payload_data = {
+            "allyCode": ally_code,
+            "enums": enums
+        }
+
+        response = self._make_request("/player", payload_data)
+        return response.json()
+
+    def get_guild(self, guild_id: str, enums: bool = False) -> Dict[str, Any]:
+        """
+        Get guild profile, members, and raid results.
+
+        Args:
+            guild_id: Guild ID
+            enums: Whether to return enum values
+
+        Returns:
+            Dictionary containing guild data
+        """
+        payload_data = {
+            "guildId": guild_id,
+            "enums": enums
+        }
+
+        response = self._make_request("/guild", payload_data)
+
+        logger.info(f"Response status: {response.status_code}")
+        logger.debug(f"Response headers: {response.headers}")
+        logger.debug(f"Response content length: {len(response.content)}")
+
+        try:
+            data = response.json()
+            logger.info("Successfully retrieved guild data")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response: {e}")
+            logger.error(f"Response text (first 500 chars): {response.text[:500]}")
+            logger.error(f"Response content-type: {response.headers.get('content-type')}")
+            raise
+
+    def get_guild_players(self, guild_id: str) -> List[Dict[str, Any]]:
+        """
+        Get a list of players from a guild with their ally codes and names.
+
+        Args:
+            guild_id: Guild ID
+
+        Returns:
+            List of dictionaries containing player information (playerId, playerName, galacticPower, etc.)
+        """
+        guild_data = self.get_guild(guild_id)
+
+        logger.debug(f"Guild data keys: {guild_data.keys()}")
+
+        # Extract member list from guild response
+        # The structure might be different than expected, let's handle both cases
+        events = guild_data.get('events', [])
+
+        if not events:
+            logger.error("No events found in guild data")
+            logger.debug(f"Guild data structure: {list(guild_data.keys())}")
+            return []
+
+        # Get first event
+        event = events[0] if isinstance(events, list) else events
+        guild_info = event.get('guild', {})
+        members = guild_info.get('member', [])
+
+        logger.info(f"Found {len(members)} players in guild")
+
+        # Extract relevant player info
+        players = []
+        for member in members:
+            player_info = {
+                'allyCode': member.get('playerId', ''),
+                'playerName': member.get('playerName', ''),
+                'galacticPower': member.get('galacticPower', 0),
+                'characterGalacticPower': member.get('characterGalacticPower', 0),
+                'shipGalacticPower': member.get('shipGalacticPower', 0),
+                'playerLevel': member.get('playerLevel', 0),
+                'memberLevel': member.get('memberLevel', 0),
+                'guildJoinTime': member.get('guildJoinTime', 0),
+                'lastActivityTime': member.get('lastActivityTime', 0),
+            }
+            players.append(player_info)
+
+        # Sort by galactic power (descending)
+        players.sort(key=lambda x: x['galacticPower'], reverse=True)
+
+        return players
+
+
+def analyze_tw_logs(file_path: str, our_guild_id: str = 'BQ4f8IJyRma4IWSSCurp4Q', our_guild_name: str = None, client: 'SWGOHAPIClient' = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, str, str]:
+    """
+    Analyze TW logs from a JSON file and extract player statistics.
+
+    Args:
+        file_path: Path to the TW logs JSON file
+        our_guild_id: Our guild ID to filter attacks (default: BQ4f8IJyRma4IWSSCurp4Q)
+        our_guild_name: Optional guild name (will be fetched from API if client provided and name not specified)
+        client: Optional SWGOHAPIClient instance to fetch guild name from API
+
+    Returns:
+        Tuple of (our_attacks_df, opponent_attacks_df, our_defeats_df, opponent_defeats_df, our_guild_name, opponent_guild_name)
+    """
+    logger.info(f"Loading TW logs from {file_path}")
+    logger.info(f"Our guild ID: {our_guild_id}")
+
+    # Load JSON file
+    with open(file_path, 'r') as f:
+        content = f.read()
+
+    # Remove the header text if present (e.g., "TWLOGS Data:\n====...")
+    if content.startswith('TWLOGS') or content.startswith('\n'):
+        # Find the first '{' which starts the JSON
+        json_start = content.find('{')
+        if json_start > 0:
+            content = content[json_start:]
+
+    data = json.loads(content)
+
+    # Extract the events array
+    events = data.get('data', [])
+    logger.info(f"Found {len(events)} total events")
+
+    # Parse successful attacks
+    our_attacks = []
+    opponent_attacks = []
+
+    for event in events:
+        # Check if this is a successful attack
+        activity_key = event.get('payload', {}).get('zoneData', {}).get('activityLogMessage', {}).get('key', '')
+
+        if activity_key == 'TERRITORY_CHANNEL_ACTIVITY_CONFLICT_SQUAD_WIN':
+            war_squad = event.get('payload', {}).get('warSquad', {})
+            info = event.get('info', {})
+            zone_data = event.get('payload', {}).get('zoneData', {})
+
+            # Extract banner count from params
+            params = zone_data.get('activityLogMessage', {}).get('param', [])
+            banners = 0
+            if params and len(params) > 0:
+                param_values = params[0].get('paramValue', [])
+                if param_values:
+                    try:
+                        banners = int(param_values[0])
+                    except (ValueError, IndexError):
+                        banners = 0
+
+            # Get the guild ID from zone data
+            event_guild_id = zone_data.get('guildId', '')
+
+            # IMPORTANT: In SQUAD_WIN events:
+            # - info.authorName = ATTACKER (who won the battle)
+            # - warSquad.playerName = DEFENDER (who was defeated)
+            attack_data = {
+                'attacker_id': info.get('authorId', ''),
+                'attacker_name': info.get('authorName', ''),
+                'defender_id': war_squad.get('playerId', ''),
+                'defender_name': war_squad.get('playerName', ''),
+                'banners': banners,
+                'squad_power': war_squad.get('power', 0),
+                'zone_id': zone_data.get('zoneId', ''),
+                'timestamp': int(info.get('timestamp', 0)),
+                'guild_id': event_guild_id,
+            }
+
+            # Separate our attacks from opponent attacks based on guild ID
+            # Note: guildId in zoneData is the ATTACKING guild's ID (not defending!)
+            # So if zoneData.guildId == our_guild_id, it means WE are attacking
+            # And if zoneData.guildId != our_guild_id, it means OPPONENT is attacking
+            if event_guild_id == our_guild_id:
+                # This is an attack BY our guild
+                our_attacks.append(attack_data)
+            else:
+                # This is an attack BY opponent guild
+                opponent_attacks.append(attack_data)
+
+    logger.info(f"Found {len(our_attacks)} attacks by our guild")
+    logger.info(f"Found {len(opponent_attacks)} attacks by opponent guild")
+
+    # Create DataFrames
+    our_df = pd.DataFrame(our_attacks)
+    opponent_df = pd.DataFrame(opponent_attacks)
+
+    # Add defeat tracking: count how many times each player was defeated
+    if not our_df.empty and not opponent_df.empty:
+        # Count defeats for our guild (when they appear as defenders in opponent's attacks)
+        our_defeats = opponent_df.groupby(['defender_id', 'defender_name']).size().reset_index(name='defeats')
+        our_defeats.columns = ['attacker_id', 'attacker_name', 'defeats']
+
+        # Count defeats for opponent guild (when they appear as defenders in our attacks)
+        opponent_defeats = our_df.groupby(['defender_id', 'defender_name']).size().reset_index(name='defeats')
+        opponent_defeats.columns = ['attacker_id', 'attacker_name', 'defeats']
+    else:
+        our_defeats = pd.DataFrame(columns=['attacker_id', 'attacker_name', 'defeats'])
+        opponent_defeats = pd.DataFrame(columns=['attacker_id', 'attacker_name', 'defeats'])
+
+    if our_df.empty:
+        logger.warning("No attacks found for our guild")
+    if opponent_df.empty:
+        logger.warning("No attacks found for opponent guild")
+
+    # Extract guild names from the data if not provided
+    if our_guild_name is None:
+        # Try to fetch from API if client is provided
+        if client:
+            try:
+                logger.info("Fetching guild name from API...")
+                guild_data = client.get_guild(our_guild_id)
+                our_guild_name = guild_data.get('events', {}).get('guild', {}).get('name', 'DarthJedii56')
+                logger.info(f"Retrieved guild name: {our_guild_name}")
+            except Exception as e:
+                logger.warning(f"Could not fetch guild name from API: {e}")
+                our_guild_name = "DarthJedii56"
+        else:
+            our_guild_name = "DarthJedii56"
+
+    # Get opponent guild name from most common attacker in opponent attacks
+    opponent_guild_name = "Opponent Guild"
+
+    return our_df, opponent_df, our_defeats, opponent_defeats, our_guild_name, opponent_guild_name
+
+
+def get_attack_summary(df: pd.DataFrame, defeats_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generate summary statistics per player from attack data.
+
+    Args:
+        df: DataFrame with individual attack records
+        defeats_df: DataFrame with defeat counts per player
+
+    Returns:
+        DataFrame with aggregated player statistics including wins/total
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    # Group by attacker and calculate stats
+    summary = df.groupby(['attacker_id', 'attacker_name']).agg({
+        'banners': ['count', 'sum', 'mean'],
+        'squad_power': 'mean'
+    }).round(2)
+
+    # Flatten column names
+    summary.columns = ['wins', 'total_banners', 'avg_banners', 'avg_squad_power']
+    summary = summary.reset_index()
+
+    # Add defeat counts
+    if not defeats_df.empty:
+        summary = summary.merge(
+            defeats_df,
+            on=['attacker_id', 'attacker_name'],
+            how='left'
+        )
+        # Fill NaN defeats with 0
+        summary['defeats'] = summary['defeats'].fillna(0).astype(int)
+    else:
+        summary['defeats'] = 0
+
+    # Calculate total attacks (wins + defeats)
+    summary['total_attacks'] = summary['wins'] + summary['defeats']
+
+    # Create wins/total display column
+    summary['attacks'] = summary.apply(
+        lambda row: f"{int(row['wins'])}/{int(row['total_attacks'])}" if row['total_attacks'] > row['wins']
+        else str(int(row['wins'])),
+        axis=1
+    )
+
+    # Reorder columns
+    summary = summary[['attacker_id', 'attacker_name', 'attacks', 'total_banners', 'avg_banners', 'avg_squad_power']]
+
+    # Sort by total banners descending
+    summary = summary.sort_values('total_banners', ascending=False)
+
+    return summary
+
+
+def load_config_from_env() -> tuple[Optional[str], Optional[str]]:
+    """
+    Load configuration from environment variables.
+
+    Returns:
+        Tuple of (api_key, discord_id) or (None, None) if not found
+    """
+    api_key = os.getenv('SWGOH_API_KEY')
+    discord_id = os.getenv('SWGOH_DISCORD_ID')
+    return api_key, discord_id
+
+
+def main():
+    """Main entry point for the SWGOH API client."""
+    parser = argparse.ArgumentParser(
+        description='SWGOH API Client - Query data from Mhanndalorian Bot'
+    )
+    parser.add_argument(
+        '--api-key',
+        help='API key for authentication (or set SWGOH_API_KEY env var)'
+    )
+    parser.add_argument(
+        '--discord-id',
+        help='Discord user ID for authentication (or set SWGOH_DISCORD_ID env var)'
+    )
+    parser.add_argument(
+        '--ally-code',
+        default='657146191',
+        help='Player ally code to query (default: 657146191)'
+    )
+    parser.add_argument(
+        '--endpoint',
+        default='twlogs',
+        choices=['twlogs', 'player', 'guild', 'guild-players', 'analyze-tw'],
+        help='API endpoint to query (default: twlogs)'
+    )
+    parser.add_argument(
+        '--guild-id',
+        default='BQ4f8IJyRma4IWSSCurp4Q',
+        help='Guild ID (default: BQ4f8IJyRma4IWSSCurp4Q)'
+    )
+    parser.add_argument(
+        '--list-players',
+        action='store_true',
+        help='When using guild endpoint, output just the player list'
+    )
+    parser.add_argument(
+        '--enums',
+        action='store_true',
+        help='Return enum values in response'
+    )
+    parser.add_argument(
+        '--use-hmac',
+        action='store_true',
+        help='Use HMAC authentication (required for multi-user access)'
+    )
+    parser.add_argument(
+        '--input-file',
+        help='Input file for analysis (required for analyze-tw endpoint)'
+    )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose logging'
+    )
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Output results as formatted JSON'
+    )
+    parser.add_argument(
+        '--output', '-o',
+        help='Write output to file instead of stdout'
+    )
+
+    args = parser.parse_args()
+
+    # Set logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    # Get credentials
+    api_key = args.api_key
+    discord_id = args.discord_id
+
+    # Try loading from environment if not provided
+    if not api_key or not discord_id:
+        env_api_key, env_discord_id = load_config_from_env()
+        api_key = api_key or env_api_key
+        discord_id = discord_id or env_discord_id
+
+    # Handle analyze-tw endpoint separately
+    if args.endpoint == 'analyze-tw':
+        if not args.input_file:
+            logger.error("--input-file is required for analyze-tw endpoint")
+            sys.exit(1)
+
+        try:
+            # Create client if we have credentials (to fetch guild name)
+            client = None
+            if api_key and discord_id:
+                client = SWGOHAPIClient(api_key, discord_id, use_hmac=args.use_hmac)
+                logger.info("API credentials found - will fetch guild name from API")
+            else:
+                logger.info("No API credentials - using default guild name")
+
+            # Analyze TW logs
+            our_df, opponent_df, our_defeats, opponent_defeats, our_guild_name, opponent_guild_name = analyze_tw_logs(
+                args.input_file, args.guild_id, None, client
+            )
+            our_summary = get_attack_summary(our_df, our_defeats)
+            opponent_summary = get_attack_summary(opponent_df, opponent_defeats)
+
+            # Format output
+            if args.json:
+                output = json.dumps({
+                    'our_guild': {
+                        'name': our_guild_name,
+                        'attacks': json.loads(our_summary.to_json(orient='records'))
+                    },
+                    'opponent_guild': {
+                        'name': opponent_guild_name,
+                        'attacks': json.loads(opponent_summary.to_json(orient='records'))
+                    }
+                }, indent=2)
+            else:
+                output = "\n" + "=" * 80 + "\n"
+                output += f"TERRITORY WAR ATTACK SUMMARY - {our_guild_name.upper()}\n"
+                output += "=" * 80 + "\n"
+                output += f"\nTotal Attacks: {len(our_df)}\n"
+                if not our_df.empty:
+                    output += f"Unique Players: {our_summary['attacker_name'].nunique()}\n"
+                    output += f"Total Banners: {our_summary['total_banners'].sum():.0f}\n\n"
+                    output += our_summary.to_string(index=False)
+                else:
+                    output += "No attacks found for our guild.\n"
+
+                output += "\n\n" + "=" * 80 + "\n"
+                output += f"TERRITORY WAR ATTACK SUMMARY - {opponent_guild_name.upper()}\n"
+                output += "=" * 80 + "\n"
+                output += f"\nTotal Attacks: {len(opponent_df)}\n"
+                if not opponent_df.empty:
+                    output += f"Unique Players: {opponent_summary['attacker_name'].nunique()}\n"
+                    output += f"Total Banners: {opponent_summary['total_banners'].sum():.0f}\n\n"
+                    output += opponent_summary.to_string(index=False)
+                else:
+                    output += "No attacks found for opponent guild.\n"
+
+            # Write to file or stdout
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(output)
+                logger.info(f"Output written to {args.output}")
+            else:
+                print(output)
+
+        except Exception as e:
+            logger.error(f"Error analyzing TW logs: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Validate credentials for API endpoints
+    if not api_key or not discord_id:
+        logger.error("API key and Discord ID are required")
+        logger.error("Provide them via --api-key and --discord-id or set SWGOH_API_KEY and SWGOH_DISCORD_ID environment variables")
+        sys.exit(1)
+
+    # No need to validate ally-code anymore since it has a default
+
+    # Create client and make request
+    try:
+        client = SWGOHAPIClient(api_key, discord_id, use_hmac=args.use_hmac)
+
+        # Call appropriate endpoint
+        if args.endpoint == 'twlogs':
+            results = client.get_tw_logs(args.ally_code, enums=args.enums)
+        elif args.endpoint == 'player':
+            results = client.get_player(args.ally_code, enums=args.enums)
+        elif args.endpoint == 'guild':
+            results = client.get_guild(args.guild_id, enums=args.enums)
+            # If --list-players flag is set, extract just the player list
+            if args.list_players:
+                members = results.get('events', [{}])[0].get('guild', {}).get('member', [])
+                results = [{
+                    'allyCode': m.get('playerId', ''),
+                    'playerName': m.get('playerName', ''),
+                    'galacticPower': m.get('galacticPower', 0)
+                } for m in members]
+        elif args.endpoint == 'guild-players':
+            results = client.get_guild_players(args.guild_id)
+
+        # Format output
+        if args.json:
+            output = json.dumps(results, indent=2)
+        else:
+            output = f"\n{args.endpoint.upper()} Data:\n" + "=" * 80 + "\n"
+            output += json.dumps(results, indent=2)
+
+        # Write to file or stdout
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(output)
+            logger.info(f"Output written to {args.output}")
+        else:
+            print(output)
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
