@@ -486,7 +486,7 @@ def main():
     parser.add_argument(
         '--endpoint',
         default='twlogs',
-        choices=['twlogs', 'player', 'guild', 'guild-players', 'analyze-tw'],
+        choices=['twlogs', 'player', 'guild', 'guild-players', 'analyze-tw', 'ai-query', 'ai-chat'],
         help='API endpoint to query (default: twlogs)'
     )
     parser.add_argument(
@@ -526,6 +526,20 @@ def main():
     parser.add_argument(
         '--output', '-o',
         help='Write output to file instead of stdout'
+    )
+    parser.add_argument(
+        '--ai-query',
+        help='Natural language query for AI analysis (required for ai-query endpoint)'
+    )
+    parser.add_argument(
+        '--ai-provider',
+        default=os.getenv('DEFAULT_AI_PROVIDER', 'openai'),
+        choices=['openai', 'anthropic', 'google'],
+        help='AI provider to use (default: openai, or from DEFAULT_AI_PROVIDER env var)'
+    )
+    parser.add_argument(
+        '--ai-model',
+        help='AI model to use (gpt-4o-mini/gpt-4o for OpenAI, sonnet/opus/haiku for Anthropic, pro/flash for Google). Uses provider defaults if not specified.'
     )
 
     args = parser.parse_args()
@@ -611,6 +625,144 @@ def main():
 
         except Exception as e:
             logger.error(f"Error analyzing TW logs: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Handle ai-query endpoint
+    if args.endpoint == 'ai-query':
+        if not args.input_file:
+            logger.error("--input-file is required for ai-query endpoint")
+            sys.exit(1)
+        if not args.ai_query:
+            logger.error("--ai-query is required for ai-query endpoint")
+            sys.exit(1)
+
+        try:
+            from swgoh_ai_analyzer import create_analyzer
+
+            logger.info(f"Creating AI analyzer with provider: {args.ai_provider}")
+            analyzer = create_analyzer(
+                data_file=args.input_file,
+                provider=args.ai_provider,
+                model=args.ai_model,
+                guild_id=args.guild_id
+            )
+
+            logger.info(f"Running query: {args.ai_query}")
+            response = analyzer.query(args.ai_query)
+
+            # Format output
+            output = "\n" + "=" * 80 + "\n"
+            output += "AI ANALYSIS\n"
+            output += "=" * 80 + "\n"
+            output += f"Query: {args.ai_query}\n"
+            output += f"Provider: {args.ai_provider}\n"
+            output += "=" * 80 + "\n\n"
+            output += response + "\n"
+
+            # Write to file or stdout
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(output)
+                logger.info(f"Output written to {args.output}")
+            else:
+                print(output)
+
+        except Exception as e:
+            logger.error(f"Error running AI query: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Handle ai-chat endpoint
+    if args.endpoint == 'ai-chat':
+        if not args.input_file:
+            logger.error("--input-file is required for ai-chat endpoint")
+            sys.exit(1)
+
+        try:
+            from swgoh_ai_analyzer import create_analyzer
+
+            logger.info(f"Creating AI analyzer with provider: {args.ai_provider}")
+            analyzer = create_analyzer(
+                data_file=args.input_file,
+                provider=args.ai_provider,
+                model=args.ai_model,
+                guild_id=args.guild_id
+            )
+
+            print("\n" + "=" * 80)
+            print("SWGOH AI CHAT - Interactive Analysis Mode")
+            print("=" * 80)
+            print(f"Provider: {args.ai_provider}")
+            print(f"Data file: {args.input_file}")
+            print("\nType your questions about the TW data. Special commands:")
+            print("  /clear    - Clear conversation history")
+            print("  /history  - Show conversation history")
+            print("  /export   - Export conversation to file")
+            print("  /quit     - Exit chat mode")
+            print("=" * 80 + "\n")
+
+            # Interactive loop
+            while True:
+                try:
+                    user_input = input("You: ").strip()
+
+                    if not user_input:
+                        continue
+
+                    # Handle special commands
+                    if user_input.lower() == '/quit':
+                        print("\nExiting chat mode. Goodbye!")
+                        break
+                    elif user_input.lower() == '/clear':
+                        analyzer.clear_history()
+                        print("✓ Conversation history cleared.\n")
+                        continue
+                    elif user_input.lower() == '/history':
+                        history = analyzer.get_history()
+                        if not history:
+                            print("No conversation history yet.\n")
+                        else:
+                            print("\n--- Conversation History ---")
+                            for i, msg in enumerate(history, 1):
+                                role = "You" if msg['role'] == 'user' else "AI"
+                                print(f"\n[{i}] {role}: {msg['content']}")
+                            print("\n--- End History ---\n")
+                        continue
+                    elif user_input.lower().startswith('/export'):
+                        parts = user_input.split(maxsplit=1)
+                        filename = parts[1] if len(parts) > 1 else 'conversation.json'
+                        analyzer.export_conversation(filename)
+                        print(f"✓ Conversation exported to {filename}\n")
+                        continue
+
+                    # Regular chat message
+                    response = analyzer.chat(user_input)
+                    print(f"\nAI: {response}\n")
+
+                except KeyboardInterrupt:
+                    print("\n\nExiting chat mode. Goodbye!")
+                    break
+                except EOFError:
+                    print("\n\nExiting chat mode. Goodbye!")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in chat: {e}")
+                    if args.verbose:
+                        import traceback
+                        traceback.print_exc()
+                    print(f"\nError: {e}\n")
+
+        except Exception as e:
+            logger.error(f"Error starting AI chat: {e}")
             if args.verbose:
                 import traceback
                 traceback.print_exc()
