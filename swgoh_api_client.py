@@ -486,7 +486,7 @@ def main():
     parser.add_argument(
         '--endpoint',
         default='twlogs',
-        choices=['twlogs', 'player', 'guild', 'guild-players', 'analyze-tw', 'ai-query', 'ai-chat'],
+        choices=['twlogs', 'player', 'guild', 'guild-players', 'analyze-tw', 'leader-stats', 'defense-stats', 'participation', 'ai-query', 'ai-chat'],
         help='API endpoint to query (default: twlogs)'
     )
     parser.add_argument(
@@ -540,6 +540,11 @@ def main():
     parser.add_argument(
         '--ai-model',
         help='AI model to use (gpt-4o-mini/gpt-4o for OpenAI, sonnet/opus/haiku for Anthropic, pro/flash for Google). Uses provider defaults if not specified.'
+    )
+    parser.add_argument(
+        '--detail',
+        action='store_true',
+        help='Show detailed per-player squad statistics (for leader-stats endpoint)'
     )
 
     args = parser.parse_args()
@@ -625,6 +630,371 @@ def main():
 
         except Exception as e:
             logger.error(f"Error analyzing TW logs: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Handle leader-stats endpoint
+    if args.endpoint == 'leader-stats':
+        if not args.input_file:
+            logger.error("--input-file is required for leader-stats endpoint")
+            sys.exit(1)
+
+        try:
+            from swgoh_data_context import SWGOHDataContext
+
+            # Load TW data
+            context = SWGOHDataContext(guild_id=args.guild_id)
+            if not context.load_tw_logs(args.input_file):
+                logger.error(f"Failed to load TW logs from {args.input_file}")
+                sys.exit(1)
+
+            # Get summary with leader stats
+            summary = context.get_tw_summary()
+            leaders_we_faced = summary.get('defending_leaders_we_faced', [])
+            our_defending_leaders = summary.get('our_defending_leaders', [])
+
+            output = ""
+
+            # Table 1: Leaders we faced when attacking
+            if leaders_we_faced:
+                output += "\n" + "=" * 120 + "\n"
+                output += "ENEMY DEFENDING LEADERS - WHO WE ATTACKED (Sorted by Hold Rate)\n"
+                output += "=" * 140 + "\n\n"
+                output += f"Guild: {summary.get('guild_name', 'Unknown')}\n"
+                output += f"Our Total Attacks: {summary.get('total_attacks', 0)}\n\n"
+
+                # Table header
+                output += f"{'Leader':<30} | {'Attempts':>8} | {'Wins':>5} | {'Holds':>5} | {'Win Rate':>8} | {'Hold Rate':>9} | {'Avg Banners':>12}\n"
+                output += "-" * 120 + "\n"
+
+                # Table rows
+                for leader in leaders_we_faced:
+                    output += (
+                        f"{leader['leader']:<30} | "
+                        f"{leader['total_attempts']:>8} | "
+                        f"{leader['wins']:>5} | "
+                        f"{leader['holds']:>5} | "
+                        f"{leader['win_rate']:>7.1f}% | "
+                        f"{leader['hold_rate']:>8.1f}% | "
+                        f"{leader['avg_banners_on_wins']:>12.1f}\n"
+                    )
+
+                output += "\n" + "=" * 120 + "\n"
+                output += "Note: Higher hold rate = we struggled more against this leader\n"
+                output += "      Holds = defense held (failed attacks and forfeits combined)\n"
+                output += "      Avg Banners shown is only for attacks we won\n\n"
+            else:
+                output += "No data on enemy defending leaders.\n\n"
+
+            # Table 2: Our leaders that opponent attacked
+            if our_defending_leaders:
+                output += "\n" + "=" * 120 + "\n"
+                output += "OUR DEFENDING LEADERS - WHO OPPONENT ATTACKED (Sorted by Hold Rate)\n"
+                output += "=" * 120 + "\n\n"
+                opponent_stats = summary.get('opponent_stats', {})
+                output += f"Opponent Total Attacks (on us): {opponent_stats.get('total_attacks', 0)}\n\n"
+
+                # Table header
+                output += f"{'Leader':<30} | {'Attempts':>8} | {'Wins':>5} | {'Holds':>5} | {'Win Rate':>8} | {'Hold Rate':>9} | {'Avg Banners':>12}\n"
+                output += "-" * 120 + "\n"
+
+                # Table rows
+                for leader in our_defending_leaders:
+                    output += (
+                        f"{leader['leader']:<30} | "
+                        f"{leader['total_attempts']:>8} | "
+                        f"{leader['wins']:>5} | "
+                        f"{leader['holds']:>5} | "
+                        f"{leader['win_rate']:>7.1f}% | "
+                        f"{leader['hold_rate']:>8.1f}% | "
+                        f"{leader['avg_banners_on_wins']:>12.1f}\n"
+                    )
+
+                output += "\n" + "=" * 120 + "\n"
+                output += "Note: Higher hold rate = our defense held better (GOOD for us!)\n"
+                output += "      Holds = defense held (opponent's failed attacks and forfeits combined)\n"
+                output += "      Avg Banners shown is what opponent earned when they won\n"
+            else:
+                output += "No data on our defending leaders.\n"
+
+            # Detailed breakdown if --detail flag is set
+            if args.detail:
+                detailed_enemy = summary.get('detailed_enemy_squads', [])
+                detailed_ours = summary.get('detailed_our_squads', [])
+
+                # Detailed enemy squads
+                if detailed_enemy:
+                    output += "\n\n" + "=" * 140 + "\n"
+                    output += "DETAILED ENEMY DEFENDING SQUADS - BY PLAYER & LEADER (Sorted by Hold Rate)\n"
+                    output += "=" * 140 + "\n\n"
+
+                    # Table header
+                    output += f"{'Player Name':<25} | {'Leader':<30} | {'Attempts':>8} | {'Wins':>5} | {'Holds':>5} | {'Win Rate':>8} | {'Hold Rate':>9} | {'Avg Banners':>12}\n"
+                    output += "-" * 140 + "\n"
+
+                    # Table rows
+                    for squad in detailed_enemy:
+                        output += (
+                            f"{squad['defender_name']:<25} | "
+                            f"{squad['leader']:<30} | "
+                            f"{squad['total_attempts']:>8} | "
+                            f"{squad['wins']:>5} | "
+                            f"{squad['holds']:>5} | "
+                            f"{squad['win_rate']:>7.1f}% | "
+                            f"{squad['hold_rate']:>8.1f}% | "
+                            f"{squad['avg_banners_on_wins']:>12.1f}\n"
+                        )
+
+                    output += "\n"
+
+                # Detailed our squads
+                if detailed_ours:
+                    output += "\n" + "=" * 140 + "\n"
+                    output += "DETAILED OUR DEFENDING SQUADS - BY PLAYER & LEADER (Sorted by Hold Rate)\n"
+                    output += "=" * 140 + "\n\n"
+
+                    # Table header
+                    output += f"{'Player Name':<25} | {'Leader':<30} | {'Attempts':>8} | {'Wins':>5} | {'Holds':>5} | {'Win Rate':>8} | {'Hold Rate':>9} | {'Avg Banners':>12}\n"
+                    output += "-" * 140 + "\n"
+
+                    # Table rows
+                    for squad in detailed_ours:
+                        output += (
+                            f"{squad['defender_name']:<25} | "
+                            f"{squad['leader']:<30} | "
+                            f"{squad['total_attempts']:>8} | "
+                            f"{squad['wins']:>5} | "
+                            f"{squad['holds']:>5} | "
+                            f"{squad['win_rate']:>7.1f}% | "
+                            f"{squad['hold_rate']:>8.1f}% | "
+                            f"{squad['avg_banners_on_wins']:>12.1f}\n"
+                        )
+
+                    output += "\n"
+
+            # Write to file or stdout
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(output)
+                logger.info(f"Output written to {args.output}")
+            else:
+                print(output)
+
+        except Exception as e:
+            logger.error(f"Error generating leader stats: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Handle defense-stats endpoint
+    if args.endpoint == 'defense-stats':
+        if not args.input_file:
+            logger.error("--input-file is required for defense-stats endpoint")
+            sys.exit(1)
+
+        try:
+            from swgoh_data_context import SWGOHDataContext
+
+            # Load TW data
+            context = SWGOHDataContext(guild_id=args.guild_id)
+            if not context.load_tw_logs(args.input_file):
+                logger.error("Failed to load TW logs")
+                sys.exit(1)
+
+            # Get summary with defense contributor stats
+            summary = context.get_tw_summary()
+            defense_contributors = summary.get('defense_contributors', [])
+
+            # Build output
+            output = "\n" + "=" * 140 + "\n"
+            output += "DEFENSE CONTRIBUTORS - WHO DEPLOYED AND HOW THEY PERFORMED\n"
+            output += "=" * 140 + "\n\n"
+
+            if defense_contributors:
+                output += f"Total Players Who Deployed: {len(defense_contributors)}\n"
+                output += f"Total Squads Deployed: {sum(d['squads_deployed'] for d in defense_contributors)}\n\n"
+
+                # Table header
+                output += f"{'Player Name':<25} | {'Squads':>6} | {'Avg Power':>9} | {'Attempts':>8} | {'Wins':>5} | {'Holds':>5} | {'Hold Rate':>9} | {'Banners Lost':>12}\n"
+                output += "-" * 140 + "\n"
+
+                # Table rows
+                for defender in defense_contributors[:20]:  # Top 20
+                    output += (
+                        f"{defender['player_name']:<25} | "
+                        f"{defender['squads_deployed']:>6} | "
+                        f"{defender['avg_squad_power']:>9,.0f} | "
+                        f"{defender['total_attempts']:>8} | "
+                        f"{defender['wins']:>5} | "
+                        f"{defender['holds']:>5} | "
+                        f"{defender['hold_rate']:>8.1f}% | "
+                        f"{defender['banners_given_up']:>12}\n"
+                    )
+
+                output += "\n" + "=" * 140 + "\n"
+                output += "Note: Sorted by total holds (most valuable defenders first)\n"
+                output += "      Holds = defense held (opponent's failed attacks and forfeits)\n"
+                output += "      Banners Lost = total banners opponent earned when they won\n"
+                output += "      Players with 0 attempts had squads that were never attacked\n"
+            else:
+                output += "No defense deployment data found.\n"
+
+            # Write to file or stdout
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(output)
+                logger.info(f"Output written to {args.output}")
+            else:
+                print(output)
+
+        except Exception as e:
+            logger.error(f"Error generating defense stats: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+        return
+
+    # Handle participation endpoint
+    if args.endpoint == 'participation':
+        if not args.input_file:
+            logger.error("--input-file is required for participation endpoint")
+            sys.exit(1)
+
+        try:
+            from swgoh_data_context import SWGOHDataContext
+
+            # Load TW data
+            context = SWGOHDataContext(guild_id=args.guild_id)
+            if not context.load_tw_logs(args.input_file):
+                logger.error("Failed to load TW logs")
+                sys.exit(1)
+
+            # Try to load guild data to get complete roster
+            # This allows us to identify players who signed up but didn't participate at all
+            guild_loaded = False
+            if api_key and discord_id:
+                # Fetch guild data to get roster
+                try:
+                    client = SWGOHAPIClient(api_key, discord_id, use_hmac=args.use_hmac)
+                    guild_data = client.get_guild(args.guild_id)
+                    if guild_data and guild_data.get('code') == 0:
+                        # Save temporarily and load
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                            json.dump(guild_data, tmp)
+                            tmp_path = tmp.name
+
+                        if context.load_guild_data(tmp_path):
+                            guild_loaded = True
+                            logger.info("Guild roster loaded successfully")
+
+                        # Clean up temp file
+                        os.unlink(tmp_path)
+                except Exception as e:
+                    logger.warning(f"Could not load guild data: {e}")
+            else:
+                logger.info("No API credentials - skipping guild roster fetch")
+
+            # Get participation report (50 banners minimum by default)
+            # Will automatically use guild roster if loaded
+            report = context.get_participation_report(min_banners=50, min_attacks=1)
+
+            # Build output
+            output = "\n" + "=" * 140 + "\n"
+            output += "PARTICIPATION REPORT\n"
+            output += "=" * 140 + "\n\n"
+
+            if guild_loaded:
+                output += "✓ Guild roster loaded - includes complete non-participants\n\n"
+            else:
+                output += "⚠ Guild roster not loaded - non-participants limited to TW log data only\n\n"
+
+            output += f"Total Players: {report['total_players']}\n"
+            output += f"Players Who Attacked: {report['players_who_attacked']}\n"
+            output += f"Players Who Deployed Defense: {report['players_who_defended']}\n"
+            output += f"Minimum Banners Threshold: {report['min_banners_threshold']}\n\n"
+
+            # Underperformers section
+            underperformers = report.get('underperformers', [])
+            if underperformers:
+                output += "=" * 140 + "\n"
+                output += f"UNDERPERFORMERS - Attacked but earned less than {report['min_banners_threshold']} banners\n"
+                output += "=" * 140 + "\n\n"
+
+                output += f"{'Player Name':<25} | {'Attacks':>7} | {'Wins':>5} | {'Off Banners':>11} | {'Def Banners':>11} | {'Total':>7} | {'Squads':>6} | {'Holds':>5}\n"
+                output += "-" * 140 + "\n"
+
+                for player in underperformers:
+                    output += (
+                        f"{player['player_name']:<25} | "
+                        f"{player['attacks']:>7} | "
+                        f"{player['wins']:>5} | "
+                        f"{player['offensive_banners']:>11} | "
+                        f"{player['defensive_banners']:>11} | "
+                        f"{player['total_banners']:>7} | "
+                        f"{player['squads_deployed']:>6} | "
+                        f"{player['defensive_holds']:>5}\n"
+                    )
+                output += "\n"
+            else:
+                output += f"✓ No underperformers - all attacking players earned at least {report['min_banners_threshold']} banners!\n\n"
+
+            # Non-participants section
+            non_participants = report.get('non_participants', [])
+            if non_participants:
+                output += "=" * 140 + "\n"
+                output += "NON-PARTICIPANTS - Did not attack or deploy defense\n"
+                output += "=" * 140 + "\n\n"
+
+                for player in non_participants:
+                    output += f"  - {player['player_name']}\n"
+                output += "\n"
+            else:
+                output += "✓ No non-participants - everyone participated!\n\n"
+
+            # Full participation table
+            output += "=" * 140 + "\n"
+            output += "FULL PARTICIPATION TABLE (sorted by banners)\n"
+            output += "=" * 140 + "\n\n"
+
+            output += f"{'Player Name':<25} | {'Attacks':>7} | {'Wins':>5} | {'Off Banners':>11} | {'Def Banners':>11} | {'Total':>7} | {'Squads':>6} | {'Holds':>5}\n"
+            output += "-" * 140 + "\n"
+
+            for player in report.get('all_participants', []):
+                output += (
+                    f"{player['player_name']:<25} | "
+                    f"{player['attacks']:>7} | "
+                    f"{player['wins']:>5} | "
+                    f"{player['offensive_banners']:>11} | "
+                    f"{player['defensive_banners']:>11} | "
+                    f"{player['total_banners']:>7} | "
+                    f"{player['squads_deployed']:>6} | "
+                    f"{player['defensive_holds']:>5}\n"
+                )
+
+            output += "\n" + "=" * 140 + "\n"
+            output += f"Note: Underperformers are players who attacked but earned less than {report['min_banners_threshold']} banners\n"
+            output += "      This may indicate inefficient attacks or weak squads\n"
+
+            # Write to file or stdout
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(output)
+                logger.info(f"Output written to {args.output}")
+            else:
+                print(output)
+
+        except Exception as e:
+            logger.error(f"Error generating participation report: {e}")
             if args.verbose:
                 import traceback
                 traceback.print_exc()

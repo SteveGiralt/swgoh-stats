@@ -68,19 +68,30 @@ DATA_STRUCTURE_WARNINGS = """
 ## CRITICAL Data Structure Information
 
 **VERY IMPORTANT - Field Naming:**
-In SQUAD_WIN events (attack logs), the field naming is counterintuitive:
-- `authorId` / `authorName` = THE ATTACKER (who won the battle)
-- `warSquad.playerId` / `warSquad.playerName` = THE DEFENDER (who lost/was defeated)
+In attack log events, the field naming is counterintuitive:
+- `authorId` / `authorName` = THE ATTACKER (who performed the attack)
+- `warSquad.playerId` / `warSquad.playerName` = THE DEFENDER (who was attacked)
 
 **Guild ID Context:**
 - `zoneData.guildId` = THE ATTACKING GUILD'S ID
 - If `zoneData.guildId` matches our guild ID → WE are attacking
 - If `zoneData.guildId` does NOT match → OPPONENT is attacking
 
-**Event Types:**
-- `TERRITORY_CHANNEL_ACTIVITY_CONFLICT_SQUAD_WIN` = Successful attack (earns banners)
-- `TERRITORY_CHANNEL_ACTIVITY_CONFLICT_DEFENSE_DEPLOY` = Defense placement
-- `EMPTY` with `squadStatus == 2` = Attack attempt (may include losses)
+**Event Types and Attack Outcomes:**
+- `TERRITORY_CHANNEL_ACTIVITY_CONFLICT_SQUAD_WIN` (squadStatus: 3) = Win (attacker defeated defense)
+- `EMPTY` with `squadStatus: 1` = Hold/Loss (defense held - attacker failed to defeat)
+- `EMPTY` with `squadStatus: 2` = Hold/Forfeit (defense held - attacker gave up early)
+- **IMPORTANT**: When a WIN occurs, BOTH a SQUAD_WIN event AND an EMPTY/squadStatus:2 event are logged
+  - Deduplicate using (attacker_id, defender_id, defending_leader, successfulDefends) tuple
+  - The SQUAD_WIN event has the banner count; the EMPTY event does not
+- NOTE: We cannot distinguish between "forfeit" and "loss" in reporting - both are "holds"
+
+**Defense Events:**
+- `TERRITORY_CHANNEL_ACTIVITY_CONFLICT_DEFENSE_DEPLOY` = Squad defense placement
+- `TERRITORY_CHANNEL_ACTIVITY_CONFLICT_DEFENSE_FLEET_DEPLOY` = Fleet defense placement
+- **IMPORTANT**: Deployment events show UNTOUCHED defenses only (never attacked)
+  - When a squad is attacked, its deployment event is removed from the logs
+  - To get complete defense picture: deployment events + attacked squads from attack logs
 """
 
 # System prompt for TW analysis
@@ -219,16 +230,17 @@ def format_tw_summary(summary_stats: dict) -> str:
         context_parts.append(f"| Unique Players | {our_stats.get('unique_players', 0)} | {opp_stats.get('unique_players', 0)} |")
         context_parts.append("")
 
-    # Defending leader stats
-    if 'defending_leaders' in summary_stats:
-        context_parts.append("### Defending Leaders We Struggled Against Most")
+    # Defending leader stats - enemy leaders we attacked
+    defending_leaders = summary_stats.get('defending_leaders_we_faced') or summary_stats.get('defending_leaders', [])
+    if defending_leaders:
+        context_parts.append("### Enemy Defending Leaders - Who We Attacked")
         context_parts.append("")
         context_parts.append("*Sorted by Hold Rate (% of attacks that failed). Higher hold rate = we struggled more.*")
         context_parts.append("")
         context_parts.append("| Leader | Attempts | Wins | Holds | Win Rate | Hold Rate | Avg Banners (on wins) |")
         context_parts.append("|--------|----------|------|-------|----------|-----------|----------------------|")
 
-        for leader in summary_stats['defending_leaders'][:10]:
+        for leader in defending_leaders[:10]:
             context_parts.append(
                 f"| {leader['leader']} | {leader['total_attempts']} | "
                 f"{leader['wins']} | {leader['holds']} | "
@@ -237,8 +249,47 @@ def format_tw_summary(summary_stats: dict) -> str:
             )
         context_parts.append("")
 
+    # Our defending leaders - how opponent did attacking us
+    our_defending_leaders = summary_stats.get('our_defending_leaders', [])
+    if our_defending_leaders:
+        context_parts.append("### Our Defending Leaders - Who Opponent Attacked")
+        context_parts.append("")
+        context_parts.append("*Sorted by Hold Rate. Higher hold rate = our defense held better (GOOD for us!).*")
+        context_parts.append("")
+        context_parts.append("| Leader | Attempts | Wins | Holds | Win Rate | Hold Rate | Avg Banners (opponent earned) |")
+        context_parts.append("|--------|----------|------|-------|----------|-----------|-------------------------------|")
+
+        for leader in our_defending_leaders[:10]:
+            context_parts.append(
+                f"| {leader['leader']} | {leader['total_attempts']} | "
+                f"{leader['wins']} | {leader['holds']} | "
+                f"{leader['win_rate']:.1f}% | {leader['hold_rate']:.1f}% | "
+                f"{leader['avg_banners_on_wins']:.1f} |"
+            )
+        context_parts.append("")
+
+    # Defense contributors - who deployed defenses and their performance
+    defense_contributors = summary_stats.get('defense_contributors', [])
+    if defense_contributors:
+        context_parts.append("### Defense Contributors - Who Deployed Defenses")
+        context_parts.append("")
+        context_parts.append("*Sorted by total holds (most valuable defenders first).*")
+        context_parts.append("")
+        context_parts.append("| Player | Squads | Avg Power | Attempts | Wins | Holds | Hold Rate | Banners Lost |")
+        context_parts.append("|--------|--------|-----------|----------|------|-------|-----------|--------------|")
+
+        for defender in defense_contributors[:10]:
+            context_parts.append(
+                f"| {defender['player_name']} | {defender['squads_deployed']} | "
+                f"{defender['avg_squad_power']:,.0f} | {defender['total_attempts']} | "
+                f"{defender['wins']} | {defender['holds']} | "
+                f"{defender['hold_rate']:.1f}% | {defender['banners_given_up']} |"
+            )
+        context_parts.append("")
+
     # Additional context note
     context_parts.append("*Note: Full detailed data is available if you need specific player lookups or deeper analysis.*")
+    context_parts.append("*Holds = defense held (includes both failed attacks and forfeits)*")
 
     return "\n".join(context_parts)
 
