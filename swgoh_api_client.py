@@ -471,6 +471,11 @@ def main():
         description='SWGOH API Client - Query data from Mhanndalorian Bot'
     )
     parser.add_argument(
+        '--menu',
+        action='store_true',
+        help='Launch interactive menu system (default if no other arguments provided)'
+    )
+    parser.add_argument(
         '--api-key',
         help='API key for authentication (or set SWGOH_API_KEY env var)'
     )
@@ -548,6 +553,25 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # If no arguments provided (except defaults), launch menu system
+    # Check if any non-default arguments were provided
+    provided_args = [arg for arg in sys.argv[1:] if not arg.startswith('-')]
+    has_explicit_args = len(sys.argv) > 1 and (
+        args.menu or
+        args.input_file or
+        args.ai_query or
+        args.endpoint != 'twlogs' or
+        args.output or
+        args.list_players or
+        args.detail
+    )
+
+    # Launch menu system if --menu flag or no explicit arguments
+    if args.menu or not has_explicit_args:
+        from swgoh_menu import main as menu_main
+        menu_main()
+        return
 
     # Set logging level
     if args.verbose:
